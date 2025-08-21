@@ -24,7 +24,7 @@ import java.util.Map;
 import java.util.Objects;
 
 public final class EntryPoint {
-    public static final String TAG = "PIF";
+    public static final String TAG = "zygisk-PIF";
     private static final Map<Field, String> map = new HashMap<>();
     private static final String signatureData = """
             MIIFyTCCA7GgAwIBAgIVALyxxl+zDS9SL68SzOr48309eAZyMA0GCSqGSIb3DQEBCwUAMHQxCzAJ

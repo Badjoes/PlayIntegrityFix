@@ -15,11 +15,16 @@
 // This is the public API for Zygisk modules.
 // DO NOT MODIFY ANY CODE IN THIS HEADER.
 
+// WARNING: this file may contain changes that are not finalized.
+// Always use the following published header for development:
+// https://github.com/topjohnwu/zygisk-module-sample/blob/master/module/jni/zygisk.hpp
+
 #pragma once
 
 #include <jni.h>
+#include <sys/types.h>
 
-#define ZYGISK_API_VERSION 2
+#define ZYGISK_API_VERSION 5
 
 /*
 
@@ -103,7 +108,6 @@ struct ServerSpecializeArgs;
 
 class ModuleBase {
 public:
-
     // This method is called as soon as the module is loaded into the target process.
     // A Zygisk API handle will be passed as an argument.
     virtual void onLoad([[maybe_unused]] Api *api, [[maybe_unused]] JNIEnv *env) {}
@@ -142,6 +146,7 @@ struct AppSpecializeArgs {
     jint &gid;
     jintArray &gids;
     jint &runtime_flags;
+    jobjectArray &rlimits;
     jint &mount_external;
     jstring &se_info;
     jstring &nice_name;
@@ -149,12 +154,14 @@ struct AppSpecializeArgs {
     jstring &app_data_dir;
 
     // Optional arguments. Please check whether the pointer is null before de-referencing
+    jintArray *const fds_to_ignore;
     jboolean *const is_child_zygote;
     jboolean *const is_top_app;
     jobjectArray *const pkg_data_info_list;
     jobjectArray *const whitelisted_data_info_list;
     jboolean *const mount_data_dirs;
     jboolean *const mount_storage_dirs;
+    jboolean *const mount_sysprop_overrides;
 
     AppSpecializeArgs() = delete;
 };
@@ -172,8 +179,9 @@ struct ServerSpecializeArgs {
 
 namespace internal {
 struct api_table;
-template <class T> void entry_impl(api_table *, JNIEnv *);
-}
+template <class T>
+void entry_impl(api_table *, JNIEnv *);
+}  // namespace internal
 
 // These values are used in Api::setOption(Option)
 enum Option : int {
@@ -204,7 +212,6 @@ enum StateFlag : uint32_t {
 // All API methods will stop working after post[XXX]Specialize as Zygisk will be unloaded
 // from the specialized process afterwards.
 struct Api {
-
     // Connect to a root companion process and get a Unix domain socket for IPC.
     //
     // This API only works in the pre[XXX]Specialize methods due to SELinux restrictions.
@@ -241,13 +248,22 @@ struct Api {
     // Returns bitwise-or'd zygisk::StateFlag values.
     uint32_t getFlags();
 
+    // Exempt the provided file descriptor from being automatically closed.
+    //
+    // This API only make sense in preAppSpecialize; calling this method in any other situation
+    // is either a no-op (returns true) or an error (returns false).
+    //
+    // When false is returned, the provided file descriptor will eventually be closed by zygote.
+    bool exemptFd(int fd);
+
     // Hook JNI native methods for a class
     //
     // Lookup all registered JNI native methods and replace it with your own methods.
     // The original function pointer will be saved in each JNINativeMethod's fnPtr.
     // If no matching class, method name, or signature is found, that specific JNINativeMethod.fnPtr
     // will be set to nullptr.
-    void hookJniNativeMethods(JNIEnv *env, const char *className, JNINativeMethod *methods, int numMethods);
+    void hookJniNativeMethods(JNIEnv *env, const char *className, JNINativeMethod *methods,
+                              int numMethods);
 
     // Hook functions in the PLT (Procedure Linkage Table) of ELFs loaded in memory.
     //
@@ -257,13 +273,10 @@ struct Api {
     // 56b4346000-56b4347000  r-xp    00002000   fe:00    235       /system/bin/app_process64
     // (More details: https://man7.org/linux/man-pages/man5/proc.5.html)
     //
-    // For ELFs loaded in memory with pathname matching `regex`, replace function `symbol` with `newFunc`.
+    // The `dev` and `inode` pair uniquely identifies a file being mapped into memory.
+    // For matching ELFs loaded in memory, replace function `symbol` with `newFunc`.
     // If `oldFunc` is not nullptr, the original function pointer will be saved to `oldFunc`.
-    void pltHookRegister(const char *regex, const char *symbol, void *newFunc, void **oldFunc);
-
-    // For ELFs loaded in memory with pathname matching `regex`, exclude hooks registered for `symbol`.
-    // If `symbol` is nullptr, then all symbols will be excluded.
-    void pltHookExclude(const char *regex, const char *symbol);
+    void pltHookRegister(dev_t dev, ino_t inode, const char *symbol, void *newFunc, void **oldFunc);
 
     // Commit all the hooks that was previously registered.
     // Returns false if an error occurred.
@@ -271,15 +284,16 @@ struct Api {
 
 private:
     internal::api_table *tbl;
-    template <class T> friend void internal::entry_impl(internal::api_table *, JNIEnv *);
+    template <class T>
+    friend void internal::entry_impl(internal::api_table *, JNIEnv *);
 };
 
 // Register a class as a Zygisk module
 
-#define REGISTER_ZYGISK_MODULE(clazz) \
-void zygisk_module_entry(zygisk::internal::api_table *table, JNIEnv *env) { \
-    zygisk::internal::entry_impl<clazz>(table, env);                        \
-}
+#define REGISTER_ZYGISK_MODULE(clazz)                                                              \
+    void zygisk_module_entry(zygisk::internal::api_table *table, JNIEnv *env) {                    \
+        zygisk::internal::entry_impl<clazz>(table, env);                                           \
+    }
 
 // Register a root companion request handler function for your module
 //
@@ -291,8 +305,8 @@ void zygisk_module_entry(zygisk::internal::api_table *table, JNIEnv *env) { \
 // NOTE: the function can run concurrently on multiple threads.
 // Be aware of race conditions if you have globally shared resources.
 
-#define REGISTER_ZYGISK_COMPANION(func) \
-void zygisk_companion_entry(int client) { func(client); }
+#define REGISTER_ZYGISK_COMPANION(func)                                                            \
+    void zygisk_companion_entry(int client) { func(client); }
 
 /*********************************************************
  * The following is internal ABI implementation detail.
@@ -324,12 +338,12 @@ struct api_table {
     bool (*registerModule)(api_table *, module_abi *);
 
     void (*hookJniNativeMethods)(JNIEnv *, const char *, JNINativeMethod *, int);
-    void (*pltHookRegister)(const char *, const char *, void *, void **);
-    void (*pltHookExclude)(const char *, const char *);
+    void (*pltHookRegister)(dev_t, ino_t, const char *, void *, void **);
+    bool (*exemptFd)(int);
     bool (*pltHookCommit)();
-    int  (*connectCompanion)(void * /* impl */);
+    int (*connectCompanion)(void * /* impl */);
     void (*setOption)(void * /* impl */, Option);
-    int  (*getModuleDir)(void * /* impl */);
+    int (*getModuleDir)(void * /* impl */);
     uint32_t (*getFlags)(void * /* impl */);
 };
 
@@ -344,34 +358,28 @@ void entry_impl(api_table *table, JNIEnv *env) {
     m->onLoad(&api, env);
 }
 
-} // namespace internal
+}  // namespace internal
 
 inline int Api::connectCompanion() {
     return tbl->connectCompanion ? tbl->connectCompanion(tbl->impl) : -1;
 }
-inline int Api::getModuleDir() {
-    return tbl->getModuleDir ? tbl->getModuleDir(tbl->impl) : -1;
-}
+inline int Api::getModuleDir() { return tbl->getModuleDir ? tbl->getModuleDir(tbl->impl) : -1; }
 inline void Api::setOption(Option opt) {
     if (tbl->setOption) tbl->setOption(tbl->impl, opt);
 }
-inline uint32_t Api::getFlags() {
-    return tbl->getFlags ? tbl->getFlags(tbl->impl) : 0;
-}
-inline void Api::hookJniNativeMethods(JNIEnv *env, const char *className, JNINativeMethod *methods, int numMethods) {
+inline uint32_t Api::getFlags() { return tbl->getFlags ? tbl->getFlags(tbl->impl) : 0; }
+inline bool Api::exemptFd(int fd) { return tbl->exemptFd != nullptr && tbl->exemptFd(fd); }
+inline void Api::hookJniNativeMethods(JNIEnv *env, const char *className, JNINativeMethod *methods,
+                                      int numMethods) {
     if (tbl->hookJniNativeMethods) tbl->hookJniNativeMethods(env, className, methods, numMethods);
 }
-inline void Api::pltHookRegister(const char *regex, const char *symbol, void *newFunc, void **oldFunc) {
-    if (tbl->pltHookRegister) tbl->pltHookRegister(regex, symbol, newFunc, oldFunc);
+inline void Api::pltHookRegister(dev_t dev, ino_t inode, const char *symbol, void *newFunc,
+                                 void **oldFunc) {
+    if (tbl->pltHookRegister) tbl->pltHookRegister(dev, inode, symbol, newFunc, oldFunc);
 }
-inline void Api::pltHookExclude(const char *regex, const char *symbol) {
-    if (tbl->pltHookExclude) tbl->pltHookExclude(regex, symbol);
-}
-inline bool Api::pltHookCommit() {
-    return tbl->pltHookCommit != nullptr && tbl->pltHookCommit();
-}
+inline bool Api::pltHookCommit() { return tbl->pltHookCommit != nullptr && tbl->pltHookCommit(); }
 
-} // namespace zygisk
+}  // namespace zygisk
 
 extern "C" {
 
@@ -381,4 +389,5 @@ void zygisk_module_entry(zygisk::internal::api_table *, JNIEnv *);
 [[gnu::visibility("default"), maybe_unused]]
 void zygisk_companion_entry(int);
 
-} // extern "C"
+}  // extern "C"
+

@@ -5,8 +5,8 @@
 #include "dobby.h"
 #include "json.hpp"
 
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "PIF", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "PIF", __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "zygisk-PIF", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "zygisk-PIF", __VA_ARGS__)
 
 #define DEX_PATH "/data/adb/modules/playintegrityfix/classes.dex"
 
@@ -64,7 +64,11 @@ static ssize_t xwrite(int fd, const void *buffer, size_t count_to_write) {
     return total_written;
 }
 
+#ifdef NDEBUG
 static bool DEBUG = false;
+#else
+static bool DEBUG = true;
+#endif
 static std::string DEVICE_INITIAL_SDK_INT = "21", SECURITY_PATCH, BUILD_ID;
 
 typedef void (*T_Callback)(void *, const char *, const char *, uint32_t);
@@ -98,7 +102,7 @@ static void modify_callback(void *cookie, const char *name, const char *value, u
     }
 
     if (strcmp(oldValue, value) == 0) {
-        if (DEBUG) LOGD("[%s]: %s (unchanged)", name, oldValue);
+        LOGD("[%s]: %s (unchanged)", name, oldValue);
     } else {
         LOGD("[%s]: %s -> %s", name, oldValue, value);
     }
@@ -219,7 +223,7 @@ public:
         if (spoofProvider || spoofSignature) {
             injectDex();
         } else {
-            LOGD("Dex file won't be injected due spoofProvider and spoofSignature are false");
+            LOGD("Dex file won't be injected since spoofProvider and spoofSignature are false");
         }
 
         if (spoofProps) {
